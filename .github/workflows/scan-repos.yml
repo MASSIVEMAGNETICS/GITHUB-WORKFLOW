@@ -1,0 +1,113 @@
+name: Scan Repos
+
+on:
+  workflow_dispatch:
+    inputs:
+      github_user:
+        description: 'GitHub username or organization to scan'
+        required: true
+        default: ${{ github.actor }}
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Scan repositories
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -e
+
+          GITHUB_USER="${{ inputs.github_user }}"
+          OUTPUT_FILE="repos-report.json"
+
+          echo "Scanning repositories for user/org: $GITHUB_USER"
+
+          # Initialize JSON array
+          echo "[" > "$OUTPUT_FILE"
+
+          page=1
+          first=true
+
+          while true; do
+            echo "Fetching page $page..."
+
+            # Try user repos first, then org repos if that fails
+            response=$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/users/$GITHUB_USER/repos?per_page=100&page=$page" \
+              2>/dev/null || \
+              gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/orgs/$GITHUB_USER/repos?per_page=100&page=$page" \
+              2>/dev/null || echo "[]")
+
+            # Check if response is empty array
+            if [ "$response" = "[]" ]; then
+              break
+            fi
+
+            # Process each repo in the response
+            repo_count=$(echo "$response" | jq '. | length')
+
+            if [ "$repo_count" -eq 0 ]; then
+              break
+            fi
+
+            # Add repos to output file
+            for i in $(seq 0 $((repo_count - 1))); do
+              if [ "$first" = true ]; then
+                first=false
+              else
+                echo "," >> "$OUTPUT_FILE"
+              fi
+
+              repo=$(echo "$response" | jq ".[$i] | {
+                name: .name,
+                full_name: .full_name,
+                description: .description,
+                private: .private,
+                html_url: .html_url,
+                created_at: .created_at,
+                updated_at: .updated_at,
+                pushed_at: .pushed_at,
+                size: .size,
+                stargazers_count: .stargazers_count,
+                watchers_count: .watchers_count,
+                language: .language,
+                forks_count: .forks_count,
+                open_issues_count: .open_issues_count,
+                default_branch: .default_branch,
+                topics: .topics
+              }")
+
+              echo "$repo" >> "$OUTPUT_FILE"
+            done
+
+            page=$((page + 1))
+          done
+
+          # Close JSON array
+          echo "" >> "$OUTPUT_FILE"
+          echo "]" >> "$OUTPUT_FILE"
+
+          # Pretty print the JSON
+          jq '.' "$OUTPUT_FILE" > "${OUTPUT_FILE}.tmp" && mv \
+            "${OUTPUT_FILE}.tmp" "$OUTPUT_FILE"
+
+          echo "Scan complete! Found repositories for $GITHUB_USER"
+          repo_total=$(jq '. | length' "$OUTPUT_FILE")
+          echo "Total repositories: $repo_total"
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: repos
+          path: repos-report.json
+          retention-days: 30
